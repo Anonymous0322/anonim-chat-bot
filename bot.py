@@ -1159,6 +1159,7 @@ async def main():
         logger.error(f"Xato: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
+        logger.info("Bot to'xtatildi.")
