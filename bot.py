@@ -1152,12 +1152,13 @@ async def on_startup():
 
 async def main():
     await on_startup()
-    logger.info("Polling started...")
-    async with bot:
+    logger.info("Bot polling ni boshladi...")
+    try:
         await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Xato: {e}")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
+    asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot stopped.")
