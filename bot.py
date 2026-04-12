@@ -28,15 +28,16 @@ from aiogram.types import (
 )
 
 # ========== CONFIG ==========
-API_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@uletaaay")
-DB_PATH = os.getenv("DB_PATH", "database.db")
-USERS_FILE = os.getenv("USERS_FILE", "users.txt")
-AUTODELETE_DELAY = int(os.getenv("AUTODELETE_DELAY", "60"))
+# ========== CONFIG ==========
+API_TOKEN = "8416511999:AAFbwKndsT1S98luxE_jczeCjf0g46pwckA"
+ADMIN_ID = 7901013364  # <-- O'ZINGIZNING TELEGRAM ID'INGIZNI QO'YING
+DB_PATH = "database.db"
+AUTODELETE_DELAY = 60
+SUPPORT_USERNAME = "@uletaaay"
+USERS_FILE = "users.txt"
 
-if not API_TOKEN:
-    raise ValueError("BOT_TOKEN topilmadi. Uni environment variables ichiga qo'ying.")
+
+
 
 # logging
 logging.basicConfig(level=logging.INFO)
