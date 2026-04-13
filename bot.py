@@ -147,6 +147,12 @@ RATE_LIMIT_WINDOW = 60  # seconds
 TEMP_BANS: dict[int, float] = {}
 MSG_TIMES: dict[int, list[float]] = {}
 CHAT_LOGS: dict[int, str] = {}  # user_id -> log_filename
+PREMIUM_PACKAGES = [
+    "💳 1 oy - 3,000 so'm",
+    "💳 3 oy - 7,000 so'm",
+    "💳 6 oy - 10,000 so'm",
+    "💳 12 oy - 15,000 so'm",
+]
 
 
 def contains_profanity(text: str) -> bool:
@@ -195,35 +201,63 @@ def is_registered_user(user_row: Optional[tuple]) -> bool:
 
 
 # ========== users.txt helpers ==========
-async def save_user_to_file(user_id: int, username: Optional[str]):
-    """Foydalanuvchini users.txt ga faqat 1 marta yozadi."""
+def ensure_users_file_exists():
+    if os.path.exists(USERS_FILE):
+        return
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        f.write("=== FOYDALANUVCHILAR RO'YXATI ===\n")
+        f.write(f"Yaratilgan: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 40 + "\n\n")
+
+
+def _format_users_file_line(user_row: tuple, username_fallback: Optional[str] = None) -> str:
+    user_id, username, age, gender, language, premium, banned, _, registered_at = user_row
+    username_value = username or username_fallback or "NoUsername"
+    display_username = f"@{username_value}" if username_value != "NoUsername" and not str(username_value).startswith("@") else username_value
+    gender_map = {"male": "male", "female": "female", "other": "other", None: "-"}
+    registered_text = (
+        datetime.fromtimestamp(registered_at).strftime("%Y-%m-%d %H:%M:%S")
+        if registered_at
+        else "-"
+    )
+    return (
+        f"ID: {user_id} | Username: {display_username} | "
+        f"Age: {age or '-'} | Gender: {gender_map.get(gender, gender or '-')} | "
+        f"Language: {language or '-'} | Premium: {'Yes' if premium else 'No'} | "
+        f"Banned: {'Yes' if banned else 'No'} | Registered: {registered_text}\n"
+    )
+
+
+async def sync_user_to_file(user_id: int, username_fallback: Optional[str] = None):
     try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        display_username = f"@{username}" if username else "NoUsername"
-
-        existing_ids = set()
-        if os.path.exists(USERS_FILE):
-            with open(USERS_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    match = re.search(r"ID:\s*(\d+)", line)
-                    if match:
-                        existing_ids.add(int(match.group(1)))
-
-        if user_id in existing_ids:
-            logger.info("User allaqachon users.txt da bor: %s", user_id)
+        ensure_users_file_exists()
+        user_row = await get_user_row(user_id)
+        if not user_row:
             return
 
-        user_entry = (
-            f"ID: {user_id} | Username: {display_username} | "
-            f"Qo'shilgan: {timestamp}\n"
-        )
+        new_line = _format_users_file_line(user_row, username_fallback=username_fallback)
 
-        with open(USERS_FILE, "a", encoding="utf-8") as f:
-            f.write(user_entry)
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
 
-        logger.info("Foydalanuvchi users.txt ga saqlandi: %s | %s", user_id, display_username)
+        updated = False
+        for i, line in enumerate(lines):
+            if line.startswith(f"ID: {user_id} "):
+                lines[i] = new_line
+                updated = True
+                break
+
+        if not updated:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append(new_line)
+
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+
+        logger.info("users.txt sync qilindi: %s", user_id)
     except Exception as e:
-        logger.error("users.txt ga yozishda xato: %s", e)
+        logger.error("users.txt sync qilishda xato: %s", e)
 
 
 async def get_users_txt_count() -> int:
@@ -507,8 +541,21 @@ async def is_banned(user_id: int) -> bool:
     return bool(row and row[6])
 
 
+async def get_user_lang(user_id: int, default: str = "uz") -> str:
+    user = await get_user_row(user_id)
+    if user and user[4] in TEXTS:
+        return user[4]
+    return default
+
+
 # ========== FSM states ==========
 class Register(StatesGroup):
+    choosing_language = State()
+    choosing_age = State()
+    choosing_gender = State()
+
+
+class SettingsEdit(StatesGroup):
     choosing_language = State()
     choosing_age = State()
     choosing_gender = State()
@@ -557,13 +604,8 @@ def settings_reply_kb(lang: str) -> ReplyKeyboardMarkup:
 def premium_reply_kb(lang: str) -> ReplyKeyboardMarkup:
     t = TEXTS[lang]
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="💳 1 oy - 3,000 so'm")],
-            [KeyboardButton(text="💳 3 oy - 7,000 so'm")],
-            [KeyboardButton(text="💳 6 oy - 10,000 so'm")],
-            [KeyboardButton(text="💳 12 oy - 15,000 so'm")],
-            [KeyboardButton(text=t["back"])],
-        ],
+        keyboard=[[KeyboardButton(text=package)] for package in PREMIUM_PACKAGES]
+        + [[KeyboardButton(text=t["back"])]],
         resize_keyboard=True,
         persistent=True,
     )
@@ -576,6 +618,17 @@ def lang_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="🇺🇿 Oʻzbekcha", callback_data="lang_uz"),
                 InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru"),
+            ],
+        ]
+    )
+
+
+def settings_lang_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🇺🇿 O'zbekcha", callback_data="settings_lang_uz"),
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="settings_lang_ru"),
             ],
         ]
     )
@@ -737,6 +790,7 @@ async def ban_user(m: Message):
     try:
         user_id = int(parts[1])
         await set_user_field(user_id, banned=1)
+        await sync_user_to_file(user_id)
         await stop_current_chat(user_id, notify_partner=True, show_panel=False)
         await remove_waiting(user_id)
         await m.answer(f"✅ User {user_id} bloklandi")
@@ -757,6 +811,7 @@ async def unban_user(m: Message):
     try:
         user_id = int(parts[1])
         await set_user_field(user_id, banned=0)
+        await sync_user_to_file(user_id)
         await m.answer(f"✅ User {user_id} blokdan chiqarildi")
     except ValueError:
         await m.answer("Noto'g'ri user_id")
@@ -775,6 +830,7 @@ async def give_premium(m: Message):
     try:
         user_id = int(parts[1])
         await set_user_field(user_id, premium=1)
+        await sync_user_to_file(user_id)
         await m.answer(f"✅ User {user_id} ga premium berildi")
     except ValueError:
         await m.answer("Noto'g'ri user_id")
@@ -793,6 +849,7 @@ async def remove_premium(m: Message):
     try:
         user_id = int(parts[1])
         await set_user_field(user_id, premium=0)
+        await sync_user_to_file(user_id)
         await m.answer(f"✅ User {user_id} dan premium olib tashlandi")
     except ValueError:
         await m.answer("Noto'g'ri user_id")
@@ -940,11 +997,9 @@ async def cmd_broadcast(m: Message):
 # ========== Handlers ==========
 @dp.message(Command("start"))
 async def cmd_start(m: Message, state: FSMContext):
-    is_new_user = await ensure_user(m.from_user)
+    await ensure_user(m.from_user)
     await set_last_active(m.from_user.id)
-
-    if is_new_user:
-        await save_user_to_file(m.from_user.id, m.from_user.username)
+    await sync_user_to_file(m.from_user.id, m.from_user.username)
 
     if is_admin(m.from_user.id):
         users_count = await get_total_users_count()
@@ -983,6 +1038,7 @@ async def cmd_start(m: Message, state: FSMContext):
 async def cb_choose_lang(c: CallbackQuery, state: FSMContext):
     lang_code = "uz" if c.data == "lang_uz" else "ru"
     await set_user_field(c.from_user.id, language=lang_code)
+    await sync_user_to_file(c.from_user.id, c.from_user.username)
     try:
         await c.message.edit_reply_markup(reply_markup=None)
     except Exception:
@@ -1003,6 +1059,7 @@ async def cb_choose_age(c: CallbackQuery, state: FSMContext):
         await c.answer()
         return
     await set_user_field(c.from_user.id, age=age)
+    await sync_user_to_file(c.from_user.id, c.from_user.username)
     try:
         await c.message.edit_reply_markup(reply_markup=None)
     except Exception:
@@ -1021,6 +1078,7 @@ async def cb_choose_gender(c: CallbackQuery, state: FSMContext):
     mapping = {"g_m": "male", "g_f": "female", "g_o": "other"}
     code = mapping.get(c.data, "other")
     await set_user_field(c.from_user.id, gender=code, registered_at=time.time())
+    await sync_user_to_file(c.from_user.id, c.from_user.username)
     try:
         await c.message.edit_reply_markup(reply_markup=None)
     except Exception:
@@ -1075,63 +1133,58 @@ async def handle_next_button(m: Message):
 
 
 @dp.message(F.text.in_([TEXTS["uz"]["btn_settings"], TEXTS["ru"]["btn_settings"]]))
-async def handle_settings_button(m: Message):
-    user = await get_user_row(m.from_user.id)
-    lang = user[4] if user and user[4] in TEXTS else "uz"
+async def handle_settings_button(m: Message, state: FSMContext):
+    await state.clear()
+    lang = await get_user_lang(m.from_user.id)
     await m.answer(TEXTS[lang]["settings"], reply_markup=settings_reply_kb(lang))
 
 
 @dp.message(F.text.in_([TEXTS["uz"]["btn_help"], TEXTS["ru"]["btn_help"]]))
 async def handle_help_button(m: Message):
-    user = await get_user_row(m.from_user.id)
-    lang = user[4] if user and user[4] in TEXTS else "uz"
+    lang = await get_user_lang(m.from_user.id)
     await m.answer(TEXTS[lang]["help_text"])
 
 
-@dp.message(F.text.in_([TEXTS["uz"]["btn_premium"], TEXTS["ru"]["btn_premium"]]))
+@dp.message(
+    F.text.in_([TEXTS["uz"]["btn_premium"], TEXTS["ru"]["btn_premium"], "Premium", "Премиум"])
+)
 async def handle_premium_button(m: Message):
-    user = await get_user_row(m.from_user.id)
-    lang = user[4] if user and user[4] in TEXTS else "uz"
-    await m.answer("💎 Premium paketlarni tanlang:", reply_markup=premium_reply_kb(lang))
+    lang = await get_user_lang(m.from_user.id)
+    prompt = "Premium paketni tanlang:" if lang == "uz" else "Выберите Premium пакет:"
+    await m.answer(prompt, reply_markup=premium_reply_kb(lang))
 
 
 @dp.message(F.text.in_([TEXTS["uz"]["change_age"], TEXTS["ru"]["change_age"]]))
-async def handle_change_age(m: Message):
-    user = await get_user_row(m.from_user.id)
-    lang = user[4] if user and user[4] in TEXTS else "uz"
+async def handle_change_age(m: Message, state: FSMContext):
+    lang = await get_user_lang(m.from_user.id)
+    await state.set_state(SettingsEdit.choosing_age)
     await m.answer(TEXTS[lang]["ask_age"], reply_markup=age_kb(12, 80))
 
 
 @dp.message(F.text.in_([TEXTS["uz"]["change_gender"], TEXTS["ru"]["change_gender"]]))
-async def handle_change_gender(m: Message):
-    user = await get_user_row(m.from_user.id)
-    lang = user[4] if user and user[4] in TEXTS else "uz"
+async def handle_change_gender(m: Message, state: FSMContext):
+    lang = await get_user_lang(m.from_user.id)
+    await state.set_state(SettingsEdit.choosing_gender)
     await m.answer(TEXTS[lang]["ask_gender"], reply_markup=gender_kb(lang))
 
 
 @dp.message(F.text.in_([TEXTS["uz"]["change_lang"], TEXTS["ru"]["change_lang"]]))
-async def handle_change_lang(m: Message):
-    await m.answer("🔤 Tilni tanlang:", reply_markup=lang_kb())
+async def handle_change_lang(m: Message, state: FSMContext):
+    lang = await get_user_lang(m.from_user.id)
+    await state.set_state(SettingsEdit.choosing_language)
+    await m.answer(TEXTS[lang]["choose_lang"], reply_markup=settings_lang_kb())
 
 
-@dp.message(
-    F.text.in_([
-        "💳 1 oy - 3,000 so'm",
-        "💳 3 oy - 7,000 so'm",
-        "💳 6 oy - 10,000 so'm",
-        "💳 12 oy - 15,000 so'm",
-    ])
-)
+@dp.message(F.text.in_(PREMIUM_PACKAGES))
 async def handle_premium_package(m: Message):
-    user = await get_user_row(m.from_user.id)
-    lang = user[4] if user and user[4] in TEXTS else "uz"
+    lang = await get_user_lang(m.from_user.id)
     await m.answer(TEXTS[lang]["buy_contact"].format(support=SUPPORT_USERNAME), reply_markup=premium_reply_kb(lang))
 
 
 @dp.message(F.text.in_([TEXTS["uz"]["back"], TEXTS["ru"]["back"]]))
-async def handle_back_button(m: Message):
-    user = await get_user_row(m.from_user.id)
-    lang = user[4] if user and user[4] in TEXTS else "uz"
+async def handle_back_button(m: Message, state: FSMContext):
+    await state.clear()
+    lang = await get_user_lang(m.from_user.id)
     online = await get_online_count()
     panel_text = TEXTS[lang]["panel_title"].format(online=online)
     await m.answer(panel_text, reply_markup=main_reply_kb(lang))
@@ -1146,78 +1199,52 @@ async def cb_help(c: CallbackQuery):
     await c.answer()
 
 
-@dp.callback_query(F.data.in_({"lang_uz", "lang_ru"}))
-async def cb_change_lang(c: CallbackQuery):
-    current_state = await dp.fsm.get_context(bot=bot, chat_id=c.from_user.id, user_id=c.from_user.id)
-    state_value = await current_state.get_state()
-    if state_value in {
-        Register.choosing_language.state,
-        Register.choosing_age.state,
-        Register.choosing_gender.state,
-    }:
-        await c.answer()
-        return
-
-    lang_code = "uz" if c.data == "lang_uz" else "ru"
+@dp.callback_query(SettingsEdit.choosing_language, F.data.in_({"settings_lang_uz", "settings_lang_ru"}))
+async def cb_change_lang(c: CallbackQuery, state: FSMContext):
+    lang_code = "uz" if c.data == "settings_lang_uz" else "ru"
     await set_user_field(c.from_user.id, language=lang_code)
+    await sync_user_to_file(c.from_user.id, c.from_user.username)
+    await state.clear()
     try:
         await c.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    t = TEXTS[lang_code]
-    await c.message.answer(t["changed_lang"], reply_markup=settings_reply_kb(lang_code))
+    await c.message.answer(TEXTS[lang_code]["changed_lang"], reply_markup=settings_reply_kb(lang_code))
     await c.answer()
 
 
-@dp.callback_query(F.data.startswith("age_"))
-async def cb_change_age(c: CallbackQuery):
-    current_state = await dp.fsm.get_context(bot=bot, chat_id=c.from_user.id, user_id=c.from_user.id)
-    state_value = await current_state.get_state()
-    if state_value in {
-        Register.choosing_language.state,
-        Register.choosing_age.state,
-        Register.choosing_gender.state,
-    }:
-        await c.answer()
-        return
-
+@dp.callback_query(SettingsEdit.choosing_age, F.data.startswith("age_"))
+async def cb_change_age(c: CallbackQuery, state: FSMContext):
     try:
         age = int(c.data.split("_", 1)[1])
     except Exception:
         await c.answer()
         return
     await set_user_field(c.from_user.id, age=age)
+    await sync_user_to_file(c.from_user.id, c.from_user.username)
+    await sync_user_to_file(c.from_user.id, c.from_user.username)
+    await state.clear()
     try:
         await c.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    user = await get_user_row(c.from_user.id)
-    lang = user[4] if user and user[4] in TEXTS else "uz"
+    lang = await get_user_lang(c.from_user.id)
     await c.message.answer(TEXTS[lang]["age_updated"], reply_markup=settings_reply_kb(lang))
     await c.answer()
 
 
-@dp.callback_query(F.data.in_({"g_m", "g_f", "g_o"}))
-async def cb_change_gender(c: CallbackQuery):
-    current_state = await dp.fsm.get_context(bot=bot, chat_id=c.from_user.id, user_id=c.from_user.id)
-    state_value = await current_state.get_state()
-    if state_value in {
-        Register.choosing_language.state,
-        Register.choosing_age.state,
-        Register.choosing_gender.state,
-    }:
-        await c.answer()
-        return
-
+@dp.callback_query(SettingsEdit.choosing_gender, F.data.in_({"g_m", "g_f", "g_o"}))
+async def cb_change_gender(c: CallbackQuery, state: FSMContext):
     mapping = {"g_m": "male", "g_f": "female", "g_o": "other"}
     code = mapping.get(c.data, "other")
     await set_user_field(c.from_user.id, gender=code)
+    await sync_user_to_file(c.from_user.id, c.from_user.username)
+    await state.clear()
     try:
         await c.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    user = await get_user_row(c.from_user.id)
-    lang = user[4] if user and user[4] in TEXTS else "uz"
+    lang = await get_user_lang(c.from_user.id)
     await c.message.answer(TEXTS[lang]["gender_updated"], reply_markup=settings_reply_kb(lang))
     await c.answer()
 
@@ -1275,6 +1302,7 @@ async def relay_messages(m: Message):
     if contains_profanity(txt):
         await m.answer(TEXTS[lang]["profanity"])
         await set_user_field(uid, banned=1)
+        await sync_user_to_file(uid, m.from_user.username)
         await stop_current_chat(uid, notify_partner=True, show_panel=False)
         return
 
@@ -1338,12 +1366,7 @@ async def relay_messages(m: Message):
 async def on_startup():
     os.makedirs("data", exist_ok=True)
     os.makedirs("chat_logs", exist_ok=True)
-
-    if not os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "w", encoding="utf-8") as f:
-            f.write("=== FOYDALANUVCHILAR RO'YXATI ===\n")
-            f.write(f"Yaratilgan: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("=" * 40 + "\n\n")
+    ensure_users_file_exists()
 
     await init_db()
     logger.info("Bot ishga tushdi. DB: %s", DB_PATH)
